@@ -21,7 +21,7 @@ class TokenExtractorMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         token = None
 
-        # 1. هيدر Authorization (Bearer)
+        # 1. هيدر Authorization (Bearer أو مباشر)
         auth_header = request.headers.get("authorization")
         if auth_header:
             if auth_header.lower().startswith("bearer "):
@@ -32,16 +32,22 @@ class TokenExtractorMiddleware(BaseHTTPMiddleware):
         # 2. هيدر x-api-key
         if not token:
             token = request.headers.get("x-api-key")
+            if token:
+                token = token.strip()
 
         # 3. هيدر api-key
         if not token:
             token = request.headers.get("api-key")
+            if token:
+                token = token.strip()
 
-        # 4. Query parameter
+        # 4. Query parameter (key أو api_key)
         if not token:
             token = request.query_params.get("key") or request.query_params.get("api_key")
+            if token:
+                token = token.strip()
 
-        # تخزين التوكن في request.state عشان الـ Gateway يستخدمه
+        # تخزين التوكن في request.state
         request.state.token = token
 
         response = await call_next(request)
@@ -67,7 +73,7 @@ app = FastAPI(
     openapi_url=f"/{api_prefix}/openapi.json" if api_prefix else "/openapi.json",
 )
 
-# إضافة الـ Middleware
+# إضافة الـ Middleware (قبل الـ CORS)
 app.add_middleware(TokenExtractorMiddleware)
 
 app.add_middleware(
@@ -79,6 +85,10 @@ app.add_middleware(
 )
 
 templates = Jinja2Templates(directory="templates")
+
+# ============================================================
+#  تعديل مهم: auto_error=False عشان ميطلعش خطأ لما مفيش توكن
+# ============================================================
 security_scheme = HTTPBearer(auto_error=False)
 
 
@@ -104,22 +114,26 @@ else:
 
 
 # ============================================================
-#  نقطة النهاية للفحص السريع
+#  نقاط نهاية للفحص
 # ============================================================
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "message": "Chat2API is running"}
 
 
-# ============================================================
-#  نقطة نهاية لفحص التوكن
-# ============================================================
 @app.get("/check-token")
 async def check_token(request: Request):
     token = getattr(request.state, "token", None)
     if token:
-        return {"status": "ok", "token_received": True, "token_preview": token[:10] + "..."}
-    return {"status": "no_token", "message": "No token received from any source"}
+        return {
+            "status": "ok",
+            "token_received": True,
+            "token_preview": token[:10] + "..."
+        }
+    return {
+        "status": "no_token",
+        "message": "No token received from any source"
+    }
 
 
 # ============================================================
