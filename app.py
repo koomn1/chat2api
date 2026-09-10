@@ -86,6 +86,7 @@ security_scheme = HTTPBearer(auto_error=False)
 #  ⚠️  راوتاتنا لازم تتسجل قبل استيراد الـ Gateway
 #     (لأن الـ Gateway فيه Catch-all)
 # ============================================================
+
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "message": "Chat2API is running"}
@@ -103,6 +104,30 @@ async def check_token(request: Request):
     return {
         "status": "no_token",
         "message": "No token received from any source"
+    }
+
+
+@app.get("/v1/models")
+async def list_models(request: Request):
+    """قائمة الموديلات المتاحة - مع التحقق من التوكن"""
+    from utils.configs import authorization_list
+
+    token = getattr(request.state, "token", None)
+    if not token or token not in authorization_list:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return {
+        "object": "list",
+        "data": [
+            {"id": "gpt-4o", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "gpt-4o-mini", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "gpt-4", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "gpt-3.5-turbo", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "o1", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "o1-mini", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "gpt-5", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+            {"id": "gpt-5.5", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
+        ]
     }
 
 
