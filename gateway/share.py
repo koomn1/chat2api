@@ -32,7 +32,6 @@ base_headers = {
 
 # ============================================================
 #  دالة استخراج التوكن من مصادر متعددة
-#  (لأن Railway بيشيل هيدر Authorization أحياناً)
 # ============================================================
 def extract_token(
     request: Request,
@@ -40,21 +39,16 @@ def extract_token(
     key: str = Query(None),
     api_key: str = Query(None),
 ) -> str:
-    """يستخرج التوكن من Authorization، أو x-api-key، أو query param"""
-
     token = None
 
-    # 1. من HTTPBearer
     if credentials and credentials.credentials:
         token = credentials.credentials.strip()
 
-    # 2. من request.state (لو الـ middleware حطه)
     if not token:
         token = getattr(request.state, "token", None)
         if token:
             token = token.strip()
 
-    # 3. من هيدر Authorization مباشرة
     if not token:
         auth_header = request.headers.get("authorization")
         if auth_header:
@@ -63,19 +57,16 @@ def extract_token(
             else:
                 token = auth_header.strip()
 
-    # 4. من x-api-key
     if not token:
         token = request.headers.get("x-api-key")
         if token:
             token = token.strip()
 
-    # 5. من api-key
     if not token:
         token = request.headers.get("api-key")
         if token:
             token = token.strip()
 
-    # 6. من query parameter
     if not token:
         token = key or api_key
         if token:
@@ -90,9 +81,6 @@ def extract_token(
     return token
 
 
-# ============================================================
-#  التحقق من التوكن (بديل verify_authorization القديم)
-# ============================================================
 def verify_authorization(bearer_token):
     if not bearer_token:
         raise HTTPException(status_code=401, detail="Authorization header is missing")
@@ -188,9 +176,13 @@ async def delete_seedtoken(request: Request, token: str = Security(extract_token
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
+# ============================================================
+#  chatgpt_account_check - معدل لدعم Go
+#  بيرجع بيانات افتراضية بدل ما يفشل
+# ============================================================
 async def chatgpt_account_check(access_token):
     auth_info = {}
-    client = Client(proxy=random.choice(proxy_url_list) if proxy_url_list else None)
+    client = None
     try:
         host_url = random.choice(chatgpt_base_url_list) if chatgpt_base_url_list else "https://chatgpt.com"
         req_token = await get_real_req_token(access_token)
@@ -206,26 +198,48 @@ async def chatgpt_account_check(access_token):
         session_id = hashlib.md5(access_token.encode()).hexdigest()
         proxy_url = random.choice(proxy_url_list).replace("{}", session_id) if proxy_url_list else None
         client = Client(proxy=proxy_url, impersonate=impersonate)
-        r = await client.get(f"{host_url}/backend-api/models?history_and_training_disabled=false", headers=headers,
-                             timeout=10)
-        if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code, detail=r.text)
-        models = r.json()
-        r = await client.get(f"{host_url}/backend-api/accounts/check/v4-2023-04-27", headers=headers, timeout=10)
-        if r.status_code != 200:
-            raise HTTPException(status_code=r.status_code, detail=r.text)
-        accounts_info = r.json()
 
-        auth_info.update({"models": models["models"]})
+        # محاولة جلب الموديلات
+        models = {"models": []}
+        try:
+            r = await client.get(
+                f"{host_url}/backend-api/models?history_and_training_disabled=false",
+                headers=headers,
+                timeout=10
+            )
+            if r.status_code == 200:
+                models = r.json()
+            else:
+                logger.warning(f"models fetch failed with {r.status_code}, using empty")
+        except Exception as e:
+            logger.warning(f"models fetch error: {e}")
+
+        # محاولة جلب معلومات الحساب
+        accounts_info = {"accounts": {}, "account_ordering": []}
+        try:
+            r = await client.get(
+                f"{host_url}/backend-api/accounts/check/v4-2023-04-27",
+                headers=headers,
+                timeout=10
+            )
+            if r.status_code == 200:
+                accounts_info = r.json()
+            else:
+                logger.warning(f"account check returned {r.status_code}, using defaults for Go")
+        except Exception as e:
+            logger.warning(f"account check error: {e}")
+
+        auth_info.update({"models": models.get("models", [])})
         auth_info.update({"accounts_info": accounts_info})
 
         account_ordering = accounts_info.get("account_ordering", [])
-        is_deactivated = True
-        plan_type = None
+        is_deactivated = False
+        plan_type = "go"
         team_ids = []
+
         for account in account_ordering:
-            this_is_deactivated = accounts_info['accounts'].get(account, {}).get("account", {}).get("is_deactivated", False)
-            this_plan_type = accounts_info['accounts'].get(account, {}).get("account", {}).get("plan_type", "free")
+            this_is_deactivated = accounts_info.get('accounts', {}).get(account, {}).get("account", {}).get("is_deactivated", False)
+            this_plan_type = accounts_info.get('accounts', {}).get(account, {}).get("account", {}).get("plan_type", "go")
 
             if not this_is_deactivated:
                 is_deactivated = False
@@ -233,8 +247,13 @@ async def chatgpt_account_check(access_token):
             if "team" in this_plan_type and not this_is_deactivated:
                 plan_type = this_plan_type
                 team_ids.append(account)
-            elif plan_type is None:
+            elif plan_type is None or plan_type == "go":
                 plan_type = this_plan_type
+
+        # لو مفيش accounts info، استخدم قيم افتراضية
+        if not account_ordering:
+            plan_type = "go"
+            is_deactivated = False
 
         auth_info.update({"accountCheckInfo": {
             "is_deactivated": is_deactivated,
@@ -242,12 +261,23 @@ async def chatgpt_account_check(access_token):
             "team_ids": team_ids
         }})
 
+        logger.info(f"Account check completed: plan_type={plan_type}")
         return auth_info
     except Exception as e:
         logger.error(f"chatgpt_account_check: {e}")
-        return {}
+        # بدل ما نرجع {} خالي، نرجع بيانات افتراضية عشان Go يشتغل
+        return {
+            "models": [],
+            "accounts_info": {"accounts": {}, "account_ordering": []},
+            "accountCheckInfo": {
+                "is_deactivated": False,
+                "plan_type": "go",
+                "team_ids": []
+            }
+        }
     finally:
-        await client.close()
+        if client:
+            await client.close()
 
 
 async def chatgpt_refresh(refresh_token):
@@ -277,6 +307,9 @@ async def chatgpt_refresh(refresh_token):
         await client.close()
 
 
+# ============================================================
+#  /auth/refresh - معدل عشان يشتغل مع Go
+# ============================================================
 @app.post("/auth/refresh")
 async def refresh(request: Request):
     auth_info = {}
@@ -305,16 +338,27 @@ async def refresh(request: Request):
         if chatgpt_refresh_info:
             auth_info.update(chatgpt_refresh_info)
             access_token = auth_info.get("accessToken", "")
+            # حساب Go ممكن يفشل في account check، عشان كده بندي بيانات افتراضية
             account_check_info = await chatgpt_account_check(access_token)
             if account_check_info:
                 auth_info.update(account_check_info)
                 auth_info.update({"accessToken": access_token})
                 return Response(content=json.dumps(auth_info), media_type="application/json")
     elif access_token:
+        # حتى لو account check فشل، بنرجع accessToken عشان Go يشتغل
         account_check_info = await chatgpt_account_check(access_token)
         if account_check_info:
             auth_info.update(account_check_info)
             auth_info.update({"accessToken": access_token})
             return Response(content=json.dumps(auth_info), media_type="application/json")
+        else:
+            # لو مفيش account info، بنرجع accessToken على الأقل
+            return Response(
+                content=json.dumps({
+                    "accessToken": access_token,
+                    "accountCheckInfo": {"is_deactivated": False, "plan_type": "go", "team_ids": []}
+                }),
+                media_type="application/json"
+            )
 
     raise HTTPException(status_code=401, detail="Unauthorized")
