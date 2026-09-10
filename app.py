@@ -14,7 +14,8 @@ warnings.filterwarnings("ignore")
 
 
 # ============================================================
-#  Middleware: استخراج التوكن من مصادر متعددة
+#  Middleware: استخراج التوكن + حقنه في الهيدر تاني
+#  (عشان الـ Gateway يقدر يقراه بـ HTTPBearer)
 # ============================================================
 class TokenExtractorMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -46,8 +47,26 @@ class TokenExtractorMiddleware(BaseHTTPMiddleware):
             if token:
                 token = token.strip()
 
+        # حفظ التوكن في state
         request.state.token = token
-        return await call_next(request)
+
+        # ============================================================
+        #  الأهم: حقن التوكن في الهيدر عشان الـ Gateway يقدر يقراه
+        # ============================================================
+        if token:
+            # شيل أي هيدر authorization قديم
+            new_headers = [
+                (k, v) for k, v in request.scope["headers"]
+                if k.lower() != b"authorization"
+            ]
+            # ضيف هيدر authorization جديد بالتوكن
+            new_headers.append(
+                (b"authorization", f"Bearer {token}".encode())
+            )
+            request.scope["headers"] = new_headers
+
+        response = await call_next(request)
+        return response
 
 
 # ============================================================
@@ -83,10 +102,8 @@ security_scheme = HTTPBearer(auto_error=False)
 
 
 # ============================================================
-#  ⚠️  راوتاتنا لازم تتسجل قبل استيراد الـ Gateway
-#     (لأن الـ Gateway فيه Catch-all)
+#  راوتاتنا (قبل الـ Gateway)
 # ============================================================
-
 @app.get("/ping")
 async def ping():
     return {"status": "ok", "message": "Chat2API is running"}
@@ -95,11 +112,14 @@ async def ping():
 @app.get("/check-token")
 async def check_token(request: Request):
     token = getattr(request.state, "token", None)
+    # اقفل الهيدر اللي اتحقن عشان نتأكد
+    injected_auth = request.headers.get("authorization", "none")
     if token:
         return {
             "status": "ok",
             "token_received": True,
-            "token_preview": token[:10] + "..."
+            "token_preview": token[:10] + "...",
+            "injected_auth_header": injected_auth[:20] + "..." if injected_auth != "none" else "none"
         }
     return {
         "status": "no_token",
@@ -109,9 +129,7 @@ async def check_token(request: Request):
 
 @app.get("/v1/models")
 async def list_models(request: Request):
-    """قائمة الموديلات المتاحة - مع التحقق من التوكن"""
     from utils.configs import authorization_list
-
     token = getattr(request.state, "token", None)
     if not token or token not in authorization_list:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -125,14 +143,12 @@ async def list_models(request: Request):
             {"id": "gpt-3.5-turbo", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
             {"id": "o1", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
             {"id": "o1-mini", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
-            {"id": "gpt-5", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
-            {"id": "gpt-5.5", "object": "model", "created": 1688888888, "owned_by": "chatgpt-to-api"},
         ]
     }
 
 
 # ============================================================
-#  استيراد التطبيق الأساسي والـ Gateway (بعد راوتاتنا)
+#  استيراد التطبيق الأساسي والـ Gateway
 # ============================================================
 import api.chat2api
 
