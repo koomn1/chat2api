@@ -1,5 +1,6 @@
 import asyncio
 import types
+import random
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import Request, HTTPException, Form, Security
@@ -49,13 +50,55 @@ async def process(request_data, req_token):
     return chat_service, res
 
 
+# ============================================================
+#  دالة مساعدة: تحدد إذا كان التوكن هو API key أو ChatGPT token
+# ============================================================
+def resolve_token(request: Request) -> str:
+    """بيحدد التوكن الحقيقي للاستخدام (ChatGPT token) من مصادر متعددة"""
+
+    # 1. خد التوكن من request.state (اللي الـ middleware حطه)
+    header_token = getattr(request.state, "token", None)
+
+    # 2. Fallback: من الهيدر
+    if not header_token:
+        auth = request.headers.get("authorization", "")
+        header_token = auth.replace("Bearer ", "").strip() if auth else None
+
+    if not header_token:
+        raise HTTPException(status_code=401, detail="Missing authorization")
+
+    # 3. لو التوكن ده API key (في authorization_list)، استخدم توكن من المخزن
+    from utils.configs import authorization_list
+
+    if header_token in authorization_list:
+        # استخدم توكن من الـ pool
+        available_tokens = list(set(globals.token_list) - set(globals.error_token_list))
+        if not available_tokens:
+            raise HTTPException(
+                status_code=503,
+                detail="No ChatGPT tokens available in the pool. Please upload tokens via /tokens/upload"
+            )
+        req_token = random.choice(available_tokens)
+        logger.info(f"Using pool token for API key: {header_token[:10]}...")
+    else:
+        # اعتبره توكن ChatGPT مباشر
+        req_token = header_token
+
+    return req_token
+
+
+# ============================================================
+#  Route المعدل
+# ============================================================
 @app.post(f"/{api_prefix}/v1/chat/completions" if api_prefix else "/v1/chat/completions")
-async def send_conversation(request: Request, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
-    req_token = credentials.credentials
+async def send_conversation(request: Request):
+    req_token = resolve_token(request)
+
     try:
         request_data = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail={"error": "Invalid JSON body"})
+
     chat_service, res = await async_retry(process, request_data, req_token)
     try:
         if isinstance(res, types.AsyncGeneratorType):
