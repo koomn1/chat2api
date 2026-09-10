@@ -1,27 +1,74 @@
 import warnings
+import os
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from utils.configs import enable_gateway, api_prefix
 
 warnings.filterwarnings("ignore")
 
 
+# ============================================================
+#  Middleware: استخراج التوكن من مصادر متعددة
+#  (لأن Railway أحياناً بيشيل هيدر Authorization)
+# ============================================================
+class TokenExtractorMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        token = None
+
+        # 1. هيدر Authorization (Bearer)
+        auth_header = request.headers.get("authorization")
+        if auth_header:
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+            else:
+                token = auth_header.strip()
+
+        # 2. هيدر x-api-key
+        if not token:
+            token = request.headers.get("x-api-key")
+
+        # 3. هيدر api-key
+        if not token:
+            token = request.headers.get("api-key")
+
+        # 4. Query parameter
+        if not token:
+            token = request.query_params.get("key") or request.query_params.get("api_key")
+
+        # تخزين التوكن في request.state عشان الـ Gateway يستخدمه
+        request.state.token = token
+
+        response = await call_next(request)
+        return response
+
+
+# ============================================================
+#  إعدادات الـ Logging
+# ============================================================
 log_config = uvicorn.config.LOGGING_CONFIG
 default_format = "%(asctime)s | %(levelname)s | %(message)s"
 access_format = r'%(asctime)s | %(levelname)s | %(client_addr)s: %(request_line)s %(status_code)s'
 log_config["formatters"]["default"]["fmt"] = default_format
 log_config["formatters"]["access"]["fmt"] = access_format
 
+
+# ============================================================
+#  إنشاء تطبيق FastAPI
+# ============================================================
 app = FastAPI(
-    docs_url=f"/{api_prefix}/docs",    # 设置 Swagger UI 文档路径
-    redoc_url=f"/{api_prefix}/redoc",  # 设置 Redoc 文档路径
-    openapi_url=f"/{api_prefix}/openapi.json"  # 设置 OpenAPI JSON 路径
+    docs_url=f"/{api_prefix}/docs" if api_prefix else "/docs",
+    redoc_url=f"/{api_prefix}/redoc" if api_prefix else "/redoc",
+    openapi_url=f"/{api_prefix}/openapi.json" if api_prefix else "/openapi.json",
 )
+
+# إضافة الـ Middleware
+app.add_middleware(TokenExtractorMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,8 +79,12 @@ app.add_middleware(
 )
 
 templates = Jinja2Templates(directory="templates")
-security_scheme = HTTPBearer()
+security_scheme = HTTPBearer(auto_error=False)
 
+
+# ============================================================
+#  استيراد التطبيق الأساسي والـ Gateway
+# ============================================================
 from app import app
 
 import api.chat2api
@@ -52,6 +103,28 @@ else:
         raise HTTPException(status_code=404, detail="Gateway is disabled")
 
 
+# ============================================================
+#  نقطة النهاية للفحص السريع
+# ============================================================
+@app.get("/ping")
+async def ping():
+    return {"status": "ok", "message": "Chat2API is running"}
+
+
+# ============================================================
+#  نقطة نهاية لفحص التوكن
+# ============================================================
+@app.get("/check-token")
+async def check_token(request: Request):
+    token = getattr(request.state, "token", None)
+    if token:
+        return {"status": "ok", "token_received": True, "token_preview": token[:10] + "..."}
+    return {"status": "no_token", "message": "No token received from any source"}
+
+
+# ============================================================
+#  تشغيل السيرفر
+# ============================================================
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=5005)
-    # uvicorn.run("app:app", host="0.0.0.0", port=5005, ssl_keyfile="key.pem", ssl_certfile="cert.pem")
+    port = int(os.environ.get("PORT", 5005))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
