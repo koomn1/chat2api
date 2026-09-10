@@ -4,7 +4,7 @@ import random
 import time
 
 import jwt
-from fastapi import Request, HTTPException, Security
+from fastapi import Request, HTTPException, Security, Query
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -30,6 +30,69 @@ base_headers = {
 }
 
 
+# ============================================================
+#  دالة استخراج التوكن من مصادر متعددة
+#  (لأن Railway بيشيل هيدر Authorization أحياناً)
+# ============================================================
+def extract_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Security(security_scheme),
+    key: str = Query(None),
+    api_key: str = Query(None),
+) -> str:
+    """يستخرج التوكن من Authorization، أو x-api-key، أو query param"""
+
+    token = None
+
+    # 1. من HTTPBearer
+    if credentials and credentials.credentials:
+        token = credentials.credentials.strip()
+
+    # 2. من request.state (لو الـ middleware حطه)
+    if not token:
+        token = getattr(request.state, "token", None)
+        if token:
+            token = token.strip()
+
+    # 3. من هيدر Authorization مباشرة
+    if not token:
+        auth_header = request.headers.get("authorization")
+        if auth_header:
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+            else:
+                token = auth_header.strip()
+
+    # 4. من x-api-key
+    if not token:
+        token = request.headers.get("x-api-key")
+        if token:
+            token = token.strip()
+
+    # 5. من api-key
+    if not token:
+        token = request.headers.get("api-key")
+        if token:
+            token = token.strip()
+
+    # 6. من query parameter
+    if not token:
+        token = key or api_key
+        if token:
+            token = token.strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: No token provided. Use Authorization header, x-api-key, or ?key="
+        )
+
+    return token
+
+
+# ============================================================
+#  التحقق من التوكن (بديل verify_authorization القديم)
+# ============================================================
 def verify_authorization(bearer_token):
     if not bearer_token:
         raise HTTPException(status_code=401, detail="Authorization header is missing")
@@ -37,9 +100,12 @@ def verify_authorization(bearer_token):
         raise HTTPException(status_code=401, detail="Invalid authorization")
 
 
+# ============================================================
+#  Routes
+# ============================================================
 @app.get("/seedtoken")
-async def get_seedtoken(request: Request, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
-    verify_authorization(credentials.credentials)
+async def get_seedtoken(request: Request, token: str = Security(extract_token)):
+    verify_authorization(token)
     try:
         params = request.query_params
         seed = params.get("seed")
@@ -66,20 +132,20 @@ async def get_seedtoken(request: Request, credentials: HTTPAuthorizationCredenti
 
 
 @app.post("/seedtoken")
-async def set_seedtoken(request: Request, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
-    verify_authorization(credentials.credentials)
+async def set_seedtoken(request: Request, token: str = Security(extract_token)):
+    verify_authorization(token)
     data = await request.json()
 
     seed = data.get("seed")
-    token = data.get("token")
+    user_token = data.get("token")
 
     if seed not in globals.seed_map:
         globals.seed_map[seed] = {
-            "token": token,
+            "token": user_token,
             "conversations": []
         }
     else:
-        globals.seed_map[seed]["token"] = token
+        globals.seed_map[seed]["token"] = user_token
 
     with open(globals.SEED_MAP_FILE, "w", encoding="utf-8") as f:
         json.dump(globals.seed_map, f, indent=4)
@@ -88,8 +154,8 @@ async def set_seedtoken(request: Request, credentials: HTTPAuthorizationCredenti
 
 
 @app.delete("/seedtoken")
-async def delete_seedtoken(request: Request, credentials: HTTPAuthorizationCredentials = Security(security_scheme)):
-    verify_authorization(credentials.credentials)
+async def delete_seedtoken(request: Request, token: str = Security(extract_token)):
+    verify_authorization(token)
 
     try:
         data = await request.json()
@@ -252,5 +318,3 @@ async def refresh(request: Request):
             return Response(content=json.dumps(auth_info), media_type="application/json")
 
     raise HTTPException(status_code=401, detail="Unauthorized")
-
-
